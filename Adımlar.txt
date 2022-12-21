@@ -1,0 +1,902 @@
+﻿connection string appsettings.json dosyasına eklenir.
+
+ "ConnectionStrings": {
+    "conStr" : "server=.; database=Net6JwtDb; integrated security=true;"
+  }
+
+Program.cs incelenir ve constr eklenir
+
+builder.Services.AddDbContext<JWTContext>(options =>
+{
+    options.UseSqlServer(builder.Configuration.GetConnectionString("conStr"));
+});
+
+Core Katmanı oluşturulur, 
+içerisine Application ve Domain klasörleri açılır
+Domain => Entityleri barındırır
+
+public class AppRole
+    {
+        public int Id { get; set; }
+
+        public string Definition { get; set; }
+
+        public List<AppUser> AppUsers { get; set; } = new List<AppUser>();
+    }
+
+     public class AppUser
+    {
+        public int Id { get; set; }
+        public string UserName { get; set; }
+        public string Password{ get; set; }
+        public int AppRoleId{ get; set; }
+        public AppRole AppRole { get; set; }
+    }
+
+     public class Category
+    {
+        public int Id { get; set; }
+
+        public string Definition { get; set; }
+        public List<Product> Products { get; set; } = new List<Product>();
+    }
+
+    public class Product
+    {
+        public int Id { get; set; }
+
+        public string Definition { get; set; }
+        public int Stock { get; set; }
+        public decimal Price { get; set; }
+        public int CategoryId { get; set; }
+        public Category Category { get; set; }
+    }
+
+
+Persistance katmanı oluşturulur
+içerisine Configurations, Context, Migration ve Repositories klasörleri oluşturulur.
+
+Configurations;
+
+ public class AppUserConfiguration : IEntityTypeConfiguration<AppUser>
+    {
+        public void Configure(EntityTypeBuilder<AppUser> builder)
+        {
+            builder.HasOne(x => x.AppRole).WithMany(x => x.AppUsers).HasForeignKey(x => x.AppRoleId);
+        }
+    }
+
+    public class ProductConfiguration : IEntityTypeConfiguration<Product>
+    {
+        public void Configure(EntityTypeBuilder<Product> builder)
+        {
+            builder.HasOne(x => x.Category).WithMany(x => x.Products).HasForeignKey(x => x.CategoryId);
+        }
+    }
+
+
+    public class JWTContext:DbContext
+    {
+        public JWTContext(DbContextOptions<JWTContext> options) : base(options) { }
+
+        public DbSet<Product> Products 
+        {
+            get => this.Set<Product>();
+        }
+        public DbSet<Category> Categories => this.Set<Category>();
+        public DbSet<AppUser> AppUsers => this.Set<AppUser>();
+        public DbSet<AppRole> AppRoles => this.Set<AppRole>();
+
+        protected override void OnModelCreating(ModelBuilder modelBuilder)  
+        {
+            modelBuilder.ApplyConfiguration(new ProductConfiguration());
+            modelBuilder.ApplyConfiguration(new AppUserConfiguration());
+            base.OnModelCreating(modelBuilder);
+        }
+    }
+
+yarattığımız migration klasörünün içerisine dosyalarımın çıkması için şu kodu kullanıyorum
+
+add-migration InitialCreate -OutputDir Persistance/Migrations
+update-migration
+
+
+Persistance içerisinde olan GenericRepository 
+
+ public class Repository<T> : IRepository<T> where T : class, new()
+    {
+        private readonly JWTContext _jwtContext;
+
+        public Repository(JWTContext jwtContext)
+        {
+            _jwtContext = jwtContext;
+        }
+
+        public async Task CreateAsync(T entity)
+        {
+            await this._jwtContext.Set<T>().AddAsync(entity);
+            await this._jwtContext.SaveChangesAsync();
+        }
+
+        public async Task<List<T>> GetAllAsync()
+        {
+            return await this._jwtContext.Set<T>().AsNoTracking().ToListAsync();
+        }
+
+        public async Task<T> GetByFilterAsync(Expression<Func<T, bool>> filter)
+        {
+            return await this._jwtContext.Set<T>().AsNoTracking().SingleOrDefaultAsync(filter);
+        }
+
+        public async Task<T> GetByIdAsync(object id)
+        {
+            return await this._jwtContext.Set<T>().FindAsync(id);
+        }
+
+        public async Task RemoveAsync(T entity)
+        {
+            this._jwtContext.Set<T>().Remove(entity);
+            await this._jwtContext.SaveChangesAsync();
+        }
+
+        public async Task UpdateAsync(T entity)
+        {
+            this._jwtContext.Set<T>().Update(entity);
+            await this._jwtContext.SaveChangesAsync();
+        }
+    }
+
+bu sınıfıma Repository interface'i Application katmanından gelir.
+
+public interface IRepository<T> where T : class
+    {
+        Task<List<T>> GetAllAsync();
+        Task<T> GetByIdAsync(object id);
+        Task<T> GetByFilterAsync(Expression<Func<T, bool>> filter);
+        Task CreateAsync(T entity);
+        Task UpdateAsync(T entity);
+        Task RemoveAsync(T entity);
+    }
+
+Dependency kayıt işlemi yapılır, eskisi gibi
+builder.Services.AddScoped(typeof(IRepository<>),typeof(Repository<>));
+
+Metiadtor pattern uygulamak için MediatR.Extensions.Microsoft.DependencyInjection kütüphanesi indirilir.
+tek başına kendisi yeterlidir, çünkü kendi içerisinde MediatR paketi ile geliyor.
+
+onion architecture için dosya altyapıları oluşturulur
+Core > Features > CQRS > Commands
+					   > Handlers
+					   > Queries
+
+                       Core > DTOs klasörü oluşturulur
+
+                       public class ProductListDto  => eklenir
+                         {
+                             public int Id { get; set; }
+                             public string Name { get; set; }
+                             public int Stock { get; set; }
+                             public decimal Price { get; set; }
+                             public int CategoryId { get; set; }
+                         }
+
+
+Burada ihtiyacımız olacak queryler için, az önce oluşturduğumuz Queries dosyası içerisine queryimizi tutacak sınıflarımızı oluşturuyoruz.
+
+public class GetAllProductsQueryRequest:IRequest<List<ProductListDto>>
+    {
+    }
+
+Bu queryi yakalayacak olan handlerı yazıyorum
+
+ public class GetAllProductsQueryHandler : IRequestHandler<GetAllProductsQueryRequest, List<ProductListDto>>
+    {
+        private readonly IRepository<Product> _repository;
+
+        public GetAllProductsQueryHandler(IRepository<Product> repository)
+        {
+            _repository = repository;
+        }
+
+        public async Task<List<ProductListDto>> Handle(GetAllProductsQueryRequest request, CancellationToken cancellationToken)
+        {
+            var data = await _repository.GetAllAsync();
+        }
+
+         tam burada auto mapper dependency injection lib indiriyorum
+    }
+
+Application > Mappings Klasörü oluşturuyorum
+    ProductProfile class'ı oluşturuyorum
+
+     public class ProductProfile:Profile
+    {
+        public ProductProfile()
+        {
+            CreateMap<Product, ProductListDto>().ReverseMap();
+        }
+    }
+
+    gidip yapacağım mappingleri kaydedilmek için dependency injection kayıt işlemini yapıyorum
+
+    builder.Services.AddAutoMapper(opt =>
+    {
+        opt.AddProfiles(new List<Profile>()
+        {
+            new ProductProfile() //buraya ekleyerek kayıt edicem
+        });
+    });
+
+______________________________________________________ Product Controller ________________________________________________________________
+
+Products Api Controller oluşturulur.
+
+
+[Route("api/[controller]")]
+    [ApiController]
+    public class ProductsController : ControllerBase
+    {
+        private readonly IMediator _mediator;
+
+        public ProductsController(IMediator mediator)
+        {
+            _mediator = mediator;
+        }
+
+        [HttpGet]
+        public async Task<IActionResult> List()
+        {
+            var result = await this._mediator.Send(new GetAllProductsQueryRequest());
+            return Ok(result);
+        }
+    }
+
+
+    get by id action ı için request oluşturulur
+
+     public class GetProductQueryRequest: IRequest<ProductListDto>
+    {
+        public int Id { get; set; }
+
+        public GetProductQueryRequest(int id)
+        {
+            Id = id;
+        }
+    }
+
+    sonrasında handler yazılır
+
+      public class GetProductQueryHandler : IRequestHandler<GetProductQueryRequest, ProductListDto>
+    {
+        private readonly IRepository<Product> _repository;
+        private readonly IMapper _mapper;
+
+        public GetProductQueryHandler(IRepository<Product> repository, IMapper mapper)
+        {
+            _repository = repository;
+            _mapper = mapper;
+        }
+
+        public async Task<ProductListDto> Handle(GetProductQueryRequest request, CancellationToken cancellationToken)
+        {
+            var data = await this._repository.GetByFilterAsync(x => x.Id == request.Id);
+            return _mapper.Map<ProductListDto>(data);
+        }
+
+    }
+
+    Delete için commands altına DeleteProductCommandRequest sınıfı oluşturulur
+
+      public class DeleteProductCommandRequest : IRequest //geriye birşey dönmeyecek
+    {
+        public int Id{ get; set; }
+        public DeleteProductCommandRequest(int id)
+        {
+            Id = id;
+        }
+    }
+}
+
+    daha sonrasında handler sınıfı  
+
+    public class DeleteProductCommandHandler : IRequestHandler<DeleteProductCommandRequest>
+    {
+        private readonly IRepository<Product> _repository;
+
+        public DeleteProductCommandHandler(IRepository<Product> repository)
+        {
+            _repository = repository;
+        }
+
+        public async Task<Unit> Handle(DeleteProductCommandRequest request, CancellationToken cancellationToken)
+        {
+            var deletedEntity = await this._repository.GetByIdAsync(request.Id);
+            if (deletedEntity != null)
+            {
+                await this._repository.RemoveAsync(deletedEntity);
+            }
+            return Unit.Value;
+        }
+    }
+
+    ve controller'a action eklenir
+
+      [HttpDelete("{id}")]
+        public async Task<IActionResult> Delete(int id)
+        {
+            if (id < 1)
+            {
+                return NotFound();
+            }
+            var result = await this._mediator.Send(new DeleteProductCommandRequest(id));
+            return NoContent();
+
+        }
+
+
+    create request oluşturulur
+
+    public class CreateProductCommandRequest: IRequest
+    {
+        public string Name { get; set; }
+        public int Stock { get; set; }
+        public decimal Price { get; set; }
+        public int CategoryId { get; set; }
+    }
+
+    handler oluşturulur 
+
+     public class CreateProductCommandHandler : IRequestHandler<CreateProductCommandRequest>
+    {
+        private readonly IRepository<Product> _repository;
+
+        public CreateProductCommandHandler(IRepository<Product> repository)
+        {
+            _repository = repository;
+        }
+
+        public async Task<Unit> Handle(CreateProductCommandRequest request, CancellationToken cancellationToken)
+        {
+            await this._repository.CreateAsync(new Product { 
+                CategoryId = request.CategoryId,
+                Name= request.Name,
+                Price= request.Price,
+                Stock = request.Stock,
+            });
+
+            return Unit.Value;
+        }
+    }
+
+    controller'a endpoint eklenir
+
+      [HttpPost]
+        public async Task<IActionResult> Create(CreateProductCommandRequest request)
+        {
+            await this._mediator.Send(request);
+            return Created("", request);
+        }
+
+
+    son olarak Update için request oluşturulur
+
+    public class UpdateProductCommandRequest : IRequest
+    {
+        public int Id { get; set; }
+        public string Name { get; set; }
+        public int Stock { get; set; }
+        public decimal Price { get; set; }
+        public int CategoryId { get; set; }
+    }
+
+    Handler oluşturulur
+
+    public class UpdateProductCommandHandler : IRequestHandler<UpdateProductCommandRequest>
+    {
+        private readonly IRepository<Product> _repository;
+
+        public UpdateProductCommandHandler(IRepository<Product> repository)
+        {
+            _repository = repository;
+        }
+
+        public async Task<Unit> Handle(UpdateProductCommandRequest request, CancellationToken cancellationToken)
+        {
+            var updatedProduct = await this._repository.GetByIdAsync(request.Id);
+            if (updatedProduct != null)
+            {
+                updatedProduct.Name = request.Name;
+                updatedProduct.Price = request.Price;
+                updatedProduct.Stock = request.Stock;
+                updatedProduct.CategoryId= request.CategoryId;
+                await this._repository.UpdateAsync(updatedProduct);
+            }
+
+            return Unit.Value;
+        }
+    }
+
+    endpoint eklenir 
+
+      [HttpPut]
+        public async Task<IActionResult> Update(UpdateProductCommandRequest request)
+        {
+            var result = await this._mediator.Send(request);
+            return Ok(result);
+        }
+
+______________________________________________________ Categories Controller ________________________________________________________________
+
+
+controller oluşturulur,
+
+dto oluşturulur,
+public class CategoryListDto
+    {
+        public int Id { get; set; }
+        public string Defination { get; set; }
+    }
+
+mapping ayarı yapılır,
+ public class CategoryProfile:Profile
+    {
+        public CategoryProfile()
+        {
+            CreateMap<Category, CategoryListDto>().ReverseMap();
+        }
+    }
+
+mapping ayarı daha önceden yaptığımız automapper altına eklenir
+  new CategoryProfile(),
+
+list için queryrequest ve requesthandler sınfıları oluşturulur
+
+public class GetCategoriesQueryRequest:IRequest<List<CategoryListDto>>
+    {
+    }
+
+ public class GetCategoriesQueryHandler : IRequestHandler<GetCategoriesQueryRequest, List<CategoryListDto>>
+    {
+        private readonly IRepository<Category> _repository;
+        private readonly IMapper _mapper;
+
+        public GetCategoriesQueryHandler(IRepository<Category> repository, IMapper mapper)
+        {
+            _repository = repository;
+            _mapper = mapper;
+        }
+
+        public async Task<List<CategoryListDto>> Handle(GetCategoriesQueryRequest request, CancellationToken cancellationToken)
+        {
+            var data = await this._repository.GetAllAsync();
+            return this._mapper.Map<List<CategoryListDto>>(data);
+        }
+    }
+    
+    endpoint eklenir
+
+     [HttpGet]
+        public async Task<IActionResult> List()
+        {
+            var result = await this._mediator.Send(new GetCategoriesQueryRequest());
+            return Ok(result);
+        }
+
+    _____________________ crud aynı şekilde devam ediyor
+
+    ||||||||||||||||||||||||||||||||||||||      USER CONTROLLER   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+    sql den admin ve member rollerini ekliyorum
+    bunları kullanacka 2 adet user ekliyorum
+
+    Application > Enums > RoleType
+
+    register için command request,
+
+    sonrasında handler,
+
+    ve endpoint oluşturulur,
+
+
+    login'e geçiril ve dto yaratılır ve aynı adımlar izlenir
+
+    login endpoint te tamamlantıktan sonra JWT konfigürasyonu başlanır ve
+
+    Microsoft.ApsNetCore.Authentication.JwtBearer paketi indirilir
+
+    startup ayarlamaları yapılır
+
+    builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme).AddJwtBearer(opt =>
+{
+    opt.RequireHttpsMetadata = false;
+    opt.TokenValidationParameters = new TokenValidationParameters()
+    {
+        ValidAudience = "http://localhost",
+        ValidIssuer = "http://localhost",
+        ClockSkew = TimeSpan.Zero,
+        ValidateLifetime = true,
+        IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes("barkinbayzin.net6")), //16 karakterden fazla bir şey vermemi bekler
+        ValidateIssuerSigningKey = true
+    };
+});
+
+eklenen middleware alt tarafta çağırılır.
+
+app.UseAuthentication();
+
+Infrastructe > Tools > JwtTokenSettings class'ı oluşturuyorum
+
+public class JwtTokenSettings
+    {
+        /*
+             ValidAudience = "http://localhost",
+            ValidIssuer = "http://localhost",
+            ClockSkew = TimeSpan.Zero,
+            ValidateLifetime = true,
+            IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes("barkinbayzin.net6")), //16 karakterden fazla bir şey vermemi bekler
+            ValidateIssuerSigningKey = true
+         */
+
+        public const string Issuer = "http://localhost";
+        public const string Audience = "http://localhost";
+        public const string Key = "barkinbayzin.net6";
+        public const int Expire = 30; //Gün
+    }
+
+    ayarlamalarını yaptıktan sonra, startupdaki konfigürasyonları bu classtan veriyorum 
+
+    builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme).AddJwtBearer(opt =>
+    {
+        opt.RequireHttpsMetadata = false;
+        opt.TokenValidationParameters = new TokenValidationParameters()
+        {
+            ValidAudience = JwtTokenSettings.Audience,
+            ValidIssuer = JwtTokenSettings.Issuer,
+            ClockSkew = TimeSpan.Zero,
+            ValidateLifetime = true,
+            IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(JwtTokenSettings.Key)), //16 karakterden fazla bir şey vermemi bekler
+            ValidateIssuerSigningKey = true
+        };
+    });
+
+    Infrastructe > Tools > JwtTokenGenarator class'ı oluşturuyorum
+
+     public class JwtTokenGenerator
+    {
+        public static string GenerateToken(CheckUserResponseDto dto)
+        {
+            List<Claim> claims = new List<Claim>();
+
+            //foreach (var item in new string[] {"",""}) birden fazla rol olsaydı bu şekilde geçerli olanları alıp, dögü ile ekleyebilirdik
+            //{
+            //    claims.Add(new Claim(ClaimTypes.Role, dto.Role));
+
+            //}
+
+            claims.Add(new Claim(ClaimTypes.Role, dto.Role));
+            claims.Add(new Claim(ClaimTypes.Name, dto.Username));
+            claims.Add(new Claim(ClaimTypes.NameIdentifier, dto.Id.ToString()));
+
+            JwtSecurityToken token = new JwtSecurityToken(issuer:JwtTokenSettings.Issuer, audience:JwtTokenSettings.Audience, claims:null, notBefore:DateTime.Now,expires:DateTime.Now.AddDays(JwtTokenSettings.Expire));
+            JwtSecurityTokenHandler handler = new JwtSecurityTokenHandler();
+            return handler.WriteToken(token);
+        }
+    }
+
+    login end point düzenliyorum 
+
+     [HttpPost("[action]")]
+        public async Task<IActionResult> SignIn(CheckUserQueryRequest request)
+        {
+           var userDto= await this._mediator.Send(request);
+            if(userDto.IsExist)
+            {
+                var token =  JwtTokenGenerator.GenerateToken(userDto);
+                return Created("", token);
+            }
+
+            return BadRequest("Username or password is invalid");
+        }
+
+        doğrudan bir string data dönmek yerine token datası dönmek daha sağlıklşı olabilir ve JwtTokenRepsonse classı oluştuuryorum tools'a
+
+        public class JwtTokenResponse
+        {
+            public string Token { get; set; }
+
+            public JwtTokenResponse(string token)
+            {
+                Token = token;
+            }
+        }
+
+        token generator dönüş tipi ve return değişti
+
+          public static JwtTokenResponse GenerateToken(CheckUserResponseDto dto)
+          {
+             return new JwtTokenResponse(handler.WriteToken(token))
+          }
+
+
+        şimdi ise giriş kriterlerimiz neler onları belirleyelim.
+
+        JwtTokenGenerator son hali
+
+            public class JwtTokenGenerator
+            {
+                public static JwtTokenResponse GenerateToken(CheckUserResponseDto dto)
+                {
+                    var securityKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(JwtTokenSettings.Key));
+                    SigningCredentials credentials = new SigningCredentials(securityKey, SecurityAlgorithms.HmacSha256);
+
+                    List<Claim> claims = new List<Claim>();
+
+                    claims.Add(new Claim(ClaimTypes.Role, dto.Role));
+                    claims.Add(new Claim(ClaimTypes.Name, dto.Username));
+                    claims.Add(new Claim(ClaimTypes.NameIdentifier, dto.Id.ToString()));
+
+                    JwtSecurityToken token = new JwtSecurityToken(issuer:JwtTokenSettings.Issuer, audience:JwtTokenSettings.Audience, claims:claims, notBefore:DateTime.Now,expires:DateTime.Now.AddDays(JwtTokenSettings.Expire), signingCredentials: credentials);
+                    JwtSecurityTokenHandler handler = new JwtSecurityTokenHandler();
+                    return new JwtTokenResponse(handler.WriteToken(token));
+                }
+            }
+
+
+            şimdi ise cors ayarlarımı yapıyorum, yalnız dikkat cors'un autheticaon ve autherizetion işlemlerinden önce yapmak lazım,
+            gidiyorum program.cs'e
+
+            builder.Services.AddCors(opt =>
+            {
+                opt.AddPolicy("GlobalCors", config =>
+                {
+                    config.AllowAnyOrigin().AllowAnyHeader().AllowAnyMethod();
+                });
+            });
+
+            middleware çağırırkende autheticaon ve autherizetion işlemlerinden önce yapmaya dikkat edelim
+            app.UseCors("GlobalCors"); //Birden fazla cors policy eklenebilir
+
+
+            Role mekanizması ekleyelim senaryomuzda product'ı admin ve member görebiliyor
+            ama category sadece admin
+
+            authorize attribute'larımı ilgili alanlara ekledikten sonra,
+            postmanden testlerime başlıyorum
+
+            kullanıcı ile giriyorum, dönen tokenı alıyorum
+
+            sonra categories tarafına get isteği atarken isteğin header kısmına
+            Header kısmına
+            key => Authorization
+            value => Bearer kopyalanan token (Bearerdan sonra bir boşluk bırakmak önemli)
+
+            sonrasında biraz daha güvenliği arttırmak istiyorum neden?
+            çünkü birileri benim sisteme giriş için saldırı yaptığında, birkaç üst üste yanlış deneme üzerine account'u belli bir süre kitliyeceğim
+            fakat ben bu kitlemeyi sistem saatine göre yapabileceğim için, bu arkadaş kötü niyetli ise, saat dilimini değiştirip farklı requestler atabilir.
+            işte tam burda utctime devreye giriyor. Nedir bu? aslında bütün dünyanın kabul ettiği ortak bir zaman dilimi
+
+             public class JwtTokenResponse
+                {
+                    public string Token { get; set; }
+
+                    public DateTime ExpireDate { get; set; }
+
+                    public JwtTokenResponse(string token, DateTime expireDate)
+                    {
+                        Token = token;
+                        ExpireDate = expireDate;
+                    }
+                }
+
+
+                 public class JwtTokenGenerator
+                {
+                    public static JwtTokenResponse GenerateToken(CheckUserResponseDto dto)
+                    {
+
+                        var expireDate = DateTime.UtcNow.AddMinutes(JwtTokenSettings.Expire); => değiştirildi
+
+                        JwtSecurityToken token = new JwtSecurityToken(issuer:JwtTokenSettings.Issuer, audience:JwtTokenSettings.Audience, claims:claims, notBefore:DateTime.UtcNow,expires: expireDate, signingCredentials: credentials); => uygulandı
+                        JwtSecurityTokenHandler handler = new JwtSecurityTokenHandler();
+                        return new JwtTokenResponse(handler.WriteToken(token), expireDate); => ctor imza düzenlemesi tamamlandı
+                    }
+                }
+
+
+
+
+            ________________________________________________ FRONT End - UI _______________________________________
+
+
+            ASP.Net Core Empty Project oluşturulur
+
+            Program.cs düzenlenir,
+
+            Controllers ve Views klasörlermizi oluşturuyoruz.
+
+            Sonrasında Identity Token kullanımından yararlanmak için JwtBearer Paketimi bu katmanıma da indiriyorum
+
+            ve program.cs middleware ayarlamaları gerçekleştirilir
+
+            account controller oluşturulup, login model oluşturulur.
+
+            Actionlar düzenlenerek, doğru giriş yapıldığı takdirde token yakalanır
+
+            Yakalanan token için bir model oluşturulur ve JwtSecurityTokenHandler ile yakalanır.
+
+    public class AccountController : Controller
+    {
+        //Api ile iletişim kurabilmek için IHttpClientFactory kullanıyorum,
+        //Bunun sayesinde bir client oluşturup, auth controller içerisindeki login işlemlerimi gerçekleştirebiliyorum
+        private readonly IHttpClientFactory _httpClientFactory;
+
+        public AccountController(IHttpClientFactory httpClientFactory)
+        {
+            _httpClientFactory = httpClientFactory;
+        }
+
+        public IActionResult SignIn()
+        {
+            return View();
+        }
+
+        [HttpPost]
+        public async Task<IActionResult> SignIn(UserLoginModel model)
+        {
+            //İsteği atacak bir client oluşturulur
+            var client = _httpClientFactory.CreateClient();
+
+            //İçerik json formatına dönüştürülür, bunu eskilerdeki gibi NewtonsoftJson yerine microsoftunkini kullanabiliriz.
+            var requestContent = new StringContent(JsonSerializer.Serialize(model), Encoding.UTF8, "application/json");
+
+            //post url'in nereye gideceğini ayarlıyoruz
+            var response = await client.PostAsync("http://localhost:5249/api/Auth/SignIn", requestContent);
+
+            if (response.IsSuccessStatusCode)
+            {
+                //başarılı olan response'un contenti okunur
+                var jsonData = await response.Content.ReadAsStringAsync();
+                var tokenModel = JsonSerializer.Deserialize<JWTResponeModel>(jsonData, new JsonSerializerOptions
+                {
+                    PropertyNamingPolicy = JsonNamingPolicy.CamelCase//null gelmemesi işin namingpolicy düzenlemesi yapıyorum
+                }); 
+
+                JwtSecurityTokenHandler handler= new JwtSecurityTokenHandler();
+                var token = handler.ReadJwtToken(tokenModel.Token); //tokenın direk kendisini yakaladım, 
+
+                if (token != null)
+                {
+                    //var roles = token.Claims.Where(x => x.Type == ClaimTypes.Role).Select(x => x.Value); //rol bilgilerini alırım
+                    //if (roles.Contains("Admin"))
+                    //{
+                    //    //redirect ...
+                    //}
+
+                    var claims = token.Claims.ToList(); //Claimslerimi liste haline getiriyorumki, token'ı frontendden giden istekler içerisine ekleyebileyim, daha sonra ekleme işlemini gerçekleştiriyorum eğer null değilse
+                    claims.Add(new Claim("accessToken", tokenModel.Token == null ? "" : tokenModel.Token));
+
+                    ClaimsIdentity identity = new ClaimsIdentity(claims, JwtBearerDefaults.AuthenticationScheme);
+
+                    var authProps = new AuthenticationProperties
+                    {
+                        AllowRefresh = false, //refreshlenmelerde token bitiş süresini yenilemez
+                        ExpiresUtc = tokenModel?.ExpireDate,
+                        IsPersistent = true, //token süresi bitmediği sürece hatırlasın
+                    };
+
+                    await HttpContext.SignInAsync(JwtBearerDefaults.AuthenticationScheme, new ClaimsPrincipal(identity),authProps);
+                    return RedirectToAction("Index", "Home");
+                }
+                else
+                {
+                    ModelState.AddModelError("", "kullanıcı adı veya şifre hatalı");
+
+                    return View(model);
+                }
+            }
+            else
+            {
+                //burda else ifler ile diğer status codelar kontrol edilebilir, ben kısa tutuyorum
+                ModelState.AddModelError("", "kullanıcı adı veya şifre hatalı");
+                
+                return View(model);
+            }
+           
+        }
+    }
+
+
+    __________________________________________ CATEGORY CONTROLLER ________________________________________________
+
+    [Authorize(Roles = "Admin")]
+    public class CategoryController : Controller
+    {
+        private readonly IHttpClientFactory _httpClientFactory;
+
+        public CategoryController(IHttpClientFactory httpClientFactory)
+        {
+            _httpClientFactory = httpClientFactory;
+        }
+        private HttpClient CreateClient()
+        {
+            var client = _httpClientFactory.CreateClient();
+
+            var token = User.Claims.SingleOrDefault(x => x.Type == "accessToken").Value;
+
+            client.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
+
+            //Artık elimdeki token bilgisini ekledim, artık isteklerimi yapabilirim
+
+            return client;
+        }
+        public async Task<IActionResult> List()
+        {
+            var client = this.CreateClient();
+
+            var response = await client.GetAsync("http://localhost:5249/api/Categories");
+            if (response.IsSuccessStatusCode)
+            {
+                var jsonString = await response.Content.ReadAsStringAsync();
+                var list = JsonSerializer.Deserialize<List<CategoryListRepsonseModel>>(jsonString, new JsonSerializerOptions
+                {
+                    PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+                });
+
+                return View(list);
+            }
+            //else if (response.StatusCode == System.Net.HttpStatusCode.Forbidden)
+            //    return RedirectToAction("AccessDenied", "Account");
+            else return RedirectToAction("Index", "Home");
+        }
+
+        public async Task<IActionResult> Remove(int id)
+        {
+            var client = this.CreateClient();
+
+            await client.DeleteAsync($"http://localhost:5249/api/Categories/{id}");
+
+            return RedirectToAction("List");
+        }
+
+        public IActionResult Create()
+        {
+            return View(new CategoryCreateRequestModel());
+        }
+
+        [HttpPost]
+        public async Task<IActionResult> Create(CategoryCreateRequestModel model)
+        {
+            if (ModelState.IsValid)
+            {
+                var client = this.CreateClient();
+
+                var requestContent = new StringContent(JsonSerializer.Serialize(model), Encoding.UTF8, "application/json");
+
+                var response = await client.PostAsync("http://localhost:5249/api/Categories", requestContent);
+
+                //if (response.IsSuccessStatusCode)
+                //{
+                //    var jsonData = await response.Content.ReadAsStringAsync();
+                //    var tokenModel = JsonSerializer.Deserialize<JWTResponeModel>(jsonData, new JsonSerializerOptions
+                //    {
+                //        PropertyNamingPolicy = JsonNamingPolicy.CamelCase//null gelmemesi işin namingpolicy düzenlemesi yapıyorum
+                //    });
+                //    return RedirectToAction("List");
+                //}
+                //else
+                //{
+                //    ModelState.AddModelError("", "işlem hatalı");
+
+                //    return View(model);
+                //}
+
+                return RedirectToAction("List");
+
+
+            }
+
+            return View(model);
+        }
+
+
+    }       

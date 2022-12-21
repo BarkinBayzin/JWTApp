@@ -1,0 +1,16 @@
+﻿@model JwtAppUI.Models.CategoryUpdateRequestModel
+@{
+
+    Layout = "_Layout";
+}
+
+<form asp-action="Update" asp-controller="Category" method="post">
+    <input type="hidden" asp-for="Id" />
+    <div class="mb-3">
+        <label>Kategori Adı:</label>
+        <input type="text" asp-for="@Model.Definition" class="form-control" value="@Model.Definition" />
+    </div>
+    <div class="mb-3">
+        <button type="submit" class="btn btn-info">Güncelle</button>
+    </div>
+</form>
