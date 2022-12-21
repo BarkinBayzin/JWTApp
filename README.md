@@ -1,4 +1,4 @@
-# JWTAppBackOffice
+# JWTAppBackOffice & JWTAppUI
 
   Here is the list of technologies that I used in the project:
   * Onion Architecture Pattern
