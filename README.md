@@ -6,3 +6,5 @@
   * Generic Repository Pattern
   * JWT Bearer
   * Auto Mapper
+  
+ # I have tried to explain how to proceed with the project in Turkish in the "Adımlar.txt" file. I hope it is helpful :)
